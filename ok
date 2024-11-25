@@ -1,0 +1,651 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import tkinter as tk
+from tkinter import ttk, messagebox
+from tkinter import PanedWindow
+from PIL import Image, ImageTk
+from sklearn.ensemble import RandomForestRegressor
+import yfinance as yf
+from datetime import datetime, timedelta
+import os
+import csv
+
+# Constants
+#ticker	company_name	market_cap	stock_price	revenue	earnings_time	revenue_estimate	eps_estimate	exchange_name	country	currency	open_price	previous_close
+
+CSV_FILE = 'stock_data.csv'  # CSV file for storing tickers and their data
+
+# Fetch stock data for the specified range and interval
+def fetch_stock_data(ticker, range_period, interval):
+    try:
+        stock_data = yf.download(ticker, period=range_period, interval=interval)
+        if stock_data.empty:
+            raise ValueError(f"Data not available for {ticker}")
+        return stock_data
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to download stock data: {e}")
+        return None
+# Train models for stock prediction (High and Low)
+def train_models(data):
+    try:
+        data['Date'] = pd.to_datetime(data.index)
+        data['Day'] = data['Date'].dt.dayofyear
+        X = data[['Day']]
+
+        # Train model for High values
+        model_high = RandomForestRegressor(n_estimators=100)
+        model_high.fit(X, data['High'])
+
+        # Train model for Low values
+        model_low = RandomForestRegressor(n_estimators=100)
+        model_low.fit(X, data['Low'])
+
+        return model_high, model_low
+    except Exception as e:
+        messagebox.showerror("Error", f"Error in training models: {e}")
+        return None, None
+
+# Predict the stock price (High and Low) for a future date
+def predict_stock_prices(model_high, model_low, hours_ahead):
+    future_day = (datetime.now() + timedelta(hours=hours_ahead)).timetuple().tm_yday
+    future_day_df = pd.DataFrame([[future_day]], columns=['Day'])
+    predicted_high = model_high.predict(future_day_df)[0]
+    predicted_low = model_low.predict(future_day_df)[0]
+    return predicted_high, predicted_low
+# Calculate potential earnings or loss
+def calculate_earnings_or_loss(last_closing_price, predicted_value):
+    try:
+        # Ensure the predicted price is a valid number (not None or NaN)
+        if predicted_value is None or last_closing_price is None:
+            return None  # Ensure this doesn't happen, add error handling.
+            
+        earnings = predicted_value - last_closing_price
+        percentage = (earnings / last_closing_price) * 100
+        return earnings, percentage
+    except Exception as e:
+        print(f"Error in calculating earnings or loss: {e}")
+        return None
+    '''
+    # Extract the last closing price as a float directly from the DataFrame/Series
+    if isinstance(last_closing_price, pd.Series):
+        last_closing_price = last_closing_price.iloc[0]  # Extract the first element if it's a Series
+    if isinstance(last_closing_price, np.ndarray):
+        last_closing_price = last_closing_price.item()  # Convert single-element array to scalar
+
+    # Ensure it’s a float
+    last_closing_price = float(last_closing_price)
+
+    # Debugging statement to check the type and value
+    print(f"Type of last_closing_price: {type(last_closing_price)}, Value: {last_closing_price}")
+     '''
+# Get the last closing price from the stock data
+def get_last_closing_price(stock_data):
+    return stock_data['Close'].iloc[-1]
+# Function to calculate stop loss and take profit
+def calculate_stop_loss_take_profit(last_closing, percentage=2):
+    stop_loss = last_closing * (1 - percentage / 100)  # Stop Loss at X% below
+    take_profit = last_closing * (1 + percentage / 100)  # Take Profit at X% above
+    return stop_loss, take_profit
+def clean_stock_data(stock_data):
+    """Ensure that all necessary columns contain numeric data."""
+    # Check for 'Open' column type
+    print("Before conversion - 'Open' column type:", type(stock_data['Open']))
+
+    # Convert columns to numeric, coercing any errors into NaNs
+    stock_data['Open'] = pd.to_numeric(stock_data['Open'], errors='coerce')
+    stock_data['High'] = pd.to_numeric(stock_data['High'], errors='coerce')
+    stock_data['Low'] = pd.to_numeric(stock_data['Low'], errors='coerce')
+    stock_data['Close'] = pd.to_numeric(stock_data['Close'], errors='coerce')
+    stock_data['Volume'] = pd.to_numeric(stock_data['Volume'], errors='coerce')
+    stock_data = stock_data.dropna()
+    # Drop rows with NaN values (if any are generated during conversion)
+    stock_data = stock_data.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+    
+    # Debug: Check data types and any NaN or infinite values
+    print("Data types after conversion:\n", stock_data.dtypes)
+    print("Checking for NaNs:\n", stock_data.isna().sum())
+    print("Checking for infinite values:\n", (stock_data == float('inf')).sum())
+    stock_data = stock_data.dropna()
+    # Ensure there are no infinite values
+    stock_data.replace([float('inf'), -float('inf')], pd.NA, inplace=True)
+    
+    # Drop rows again in case infinity values were present
+    stock_data = stock_data.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+
+    return stock_data
+
+# Update plot_stock_data to plot buy and sell signals
+def plot_stock_data(stock_data, selected_indicators=[]):
+    # Clear previous plots
+    for widget in plot_frame.winfo_children():
+        widget.destroy()
+
+    # Apply indicators
+    apply_indicators(stock_data, selected_indicators)
+
+    # Create a new figure for plotting candlestick chart
+    ap_dict = []
+    if 'RSI' in selected_indicators:
+        ap_rsi = mpf.make_addplot(stock_data['RSI'], panel='lower', ylabel='RSI', color='blue')
+        ap_dict.append(ap_rsi)
+    if 'MACD' in selected_indicators:
+        ap_macd = mpf.make_addplot(stock_data['MACD'], panel='lower', color='green')
+        ap_signal = mpf.make_addplot(stock_data['Signal Line'], panel='lower', color='red')
+        ap_dict.extend([ap_macd, ap_signal])
+    if 'SMA' in selected_indicators:
+        ap_sma = mpf.make_addplot(stock_data['SMA'], color='orange')
+        ap_dict.append(ap_sma)
+    if 'EMA' in selected_indicators:
+        ap_ema20 = mpf.make_addplot(stock_data['EMA20'], color='purple', label='EMA20')
+        ap_ema50 = mpf.make_addplot(stock_data['EMA50'], color='blue', label='EMA50')
+        ap_dict.extend([ap_ema20, ap_ema50])
+
+        # Buy and Sell signals
+        ap_buy = mpf.make_addplot(stock_data['Buy_Signal'], type='scatter', markersize=100, marker='^', color='green', label='Buy Signal')
+        ap_sell = mpf.make_addplot(stock_data['Sell_Signal'], type='scatter', markersize=100, marker='v', color='red', label='Sell Signal')
+        ap_dict.extend([ap_buy, ap_sell])
+
+    if 'Bollinger Bands' in selected_indicators:
+        ap_upper = mpf.make_addplot(stock_data['Upper Band'], color='green')
+        ap_lower = mpf.make_addplot(stock_data['Lower Band'], color='red')
+        ap_dict.extend([ap_upper, ap_lower])
+    print(stock_data['Open'].head())
+    stock_data = clean_stock_data(stock_data)
+    
+    fig, axes = mpf.plot(stock_data, type='candle', returnfig=True, style='charles', 
+                     title=f"Stock Price with Ladders - {update_selected_ticker}",
+                     ylabel="Price", addplot=ap_dict)
+
+    # Embed the candlestick chart into the Tkinter window
+    canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # Add toolbar for zooming/panning
+    toolbar = NavigationToolbar2Tk(canvas, plot_frame)
+    toolbar.update()
+    canvas.get_tk_widget().pack()
+    # Close the figures to avoid memory issues
+    plt.close(fig)
+# Modify update_predictions to include Limit, Stop Loss, and Take Profit calculations
+def update_predictions(ticker, selected_indicators=[]):
+    hours_ahead = int(hours_ahead_var.get())
+    range_period = range_var.get()
+    interval = interval_var.get()
+
+    # Fetch stock data
+    stock_data = fetch_stock_data(ticker, range_period, interval)
+    if stock_data is None:
+        return
+
+    # Validate stock data columns
+    stock_data = stock_data[['Open', 'High', 'Low', 'Close']]  # Ensure we have only necessary columns
+    stock_data = stock_data.apply(pd.to_numeric, errors='coerce')  # Convert to numeric, invalid values become NaN
+
+    # Check if any NaN values are present and handle them (e.g., drop rows with NaN values)
+    if stock_data.isnull().any().any():
+        print("Warning: Stock data contains NaN values. Dropping rows with NaN.")
+        stock_data = stock_data.dropna()
+
+    # Get the last closing price
+    last_closing_price = get_last_closing_price(stock_data)
+
+    # If last_closing_price is a pandas Series, extract the value (assuming it's a single value)
+    if isinstance(last_closing_price, pd.Series):
+        last_closing_price = last_closing_price.iloc[0]  # Or last_closing_price.values[0]
+
+    # Check if last_closing_price is a valid number
+    if not isinstance(last_closing_price, (float, int)):
+        result_label.config(text=f"Invalid last closing price for {ticker}")
+        return
+
+    # Train models for high and low predictions
+    model_high, model_low = train_models(stock_data)
+
+    # Predict future high and low prices
+    predicted_high, predicted_low = predict_stock_prices(model_high, model_low, hours_ahead)
+
+    # Calculate earnings or loss for high and low predictions
+    high_earnings, high_percentage = calculate_earnings_or_loss(last_closing_price, predicted_high)
+    low_earnings, low_percentage = calculate_earnings_or_loss(last_closing_price, predicted_low)
+
+    # Calculate Stop Loss and Take Profit
+    stop_loss, take_profit = calculate_stop_loss_take_profit(last_closing_price)
+
+    # Calculate Limit Price (we'll use predicted high as a limit for selling)
+    limit_price = predicted_high
+
+    # Update result labels
+    result_label.config(text=f"Last closing price of {ticker}: ${last_closing_price:.2f}\n"
+                            f"Predicted high for {ticker} after {hours_ahead} hours: ${predicted_high:.2f}\n"
+                            f"Predicted low for {ticker} after {hours_ahead} hours: ${predicted_low:.2f}\n"
+                            f"Stop Loss: ${stop_loss:.2f}\n"
+                            f"Take Profit: ${take_profit:.2f}\n"
+                            f"Limit Price: ${limit_price:.2f}")
+
+    # High potential earnings in green
+    high_result_label.config(text=f"Potential earnings (High): ${high_earnings:.2f} ({high_percentage:.2f}%)",
+                             fg="green" if high_earnings >= 0 else "red")
+
+    # Low potential losses in red
+    low_result_label.config(text=f"Potential earnings (Low): ${low_earnings:.2f} ({low_percentage:.2f}%)",
+                            fg="green" if low_earnings >= 0 else "red")
+
+    # Update ticker data in CSV file
+    update_ticker_data_in_csv(ticker, high_earnings, last_closing_price)
+
+    # Plot stock data with ladders
+    plot_stock_data_with_ladders(stock_data, selected_indicators, num_ladders=5)  # Added ladder plot
+
+def preprocess_stock_data(stock_data):
+    # Convert the necessary columns to numeric values
+    columns_to_check = ['Open', 'High', 'Low', 'Close', 'Volume']
+    
+    # Convert columns to numeric and handle errors (coerce non-numeric to NaN)
+    for col in columns_to_check:
+        stock_data[col] = pd.to_numeric(stock_data[col], errors='coerce')
+    
+    # Handle missing data (NaN values)
+    # Option 1: Drop rows with NaN values
+    stock_data = stock_data.dropna(subset=columns_to_check)
+    
+    # Option 2: Fill NaN values with forward fill (or other methods)
+    # stock_data = stock_data.fillna(method='ffill')  # Uncomment if you prefer forward fill
+    
+    return stock_data
+# Update selected ticker's data in the CSV file
+def update_ticker_data_in_csv(ticker, high_earnings, last_price):
+    data = read_csv_data()
+    found = False
+    for row in data:
+        if row[0] == ticker:
+            found = True
+            break
+    if not found:
+        data.append([ticker])
+
+    write_csv_data(data)
+
+# Read CSV file
+def read_csv_data():
+    if os.path.exists(CSV_FILE):
+        with open(CSV_FILE, mode='r') as file:
+            reader = csv.reader(file)
+            return list(reader)
+    else:
+        with open(CSV_FILE, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Ticker"])  # Header row
+        return []
+# Write data to CSV file
+def write_csv_data(data):
+    with open(CSV_FILE, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+# Global variable to hold selected indicators
+selected_indicators = []
+# Function to update the selected ticker
+def update_selected_ticker(event):
+    selected_item = ticker_treeview.selection()
+    if not selected_item:
+        result_label.config(text="Please select a stock ticker from the list.")
+        return
+        
+    selected_ticker = ticker_treeview.item(selected_item)["values"][0]
+    update_predictions(selected_ticker, selected_indicators)  # Pass selected_indicators
+# Function to create a list of tickers from the CSV file
+def create_ticker_list():
+    data = read_csv_data()  # Assuming this function returns a list of lists
+    print(f"Data Loaded: {data}")  # Log the full data
+    for row in data[1:]:  # Skip the header row
+        if len(row) >= 4:
+            ticker_treeview.insert('', 'end', values=(row[0]))
+        else:
+            print(f"Warning: Row does not have enough columns: {row}")
+# Refresh the ticker list
+def refresh_ticker_list():
+    for row in ticker_treeview.get_children():
+        ticker_treeview.delete(row)
+    create_ticker_list()
+# Update the ticker entry box on selection
+def load_ticker_to_entry(event):
+    try:
+        selected_item = ticker_treeview.selection()[0]  # Get the selected item
+        selected_ticker = ticker_treeview.item(selected_item, "values")[0]  # Get the ticker (first column)
+        ticker_entry.delete(0, tk.END)  # Clear the entry box
+        ticker_entry.insert(0, selected_ticker)  # Insert the selected ticker into the entry box
+    except IndexError:
+        pass  # Handle the case where no item is selected
+# Function to calculate buy/sell signals
+def calculate_buy_sell_signals(stock_data):
+    stock_data['Buy_Signal'] = np.nan
+    stock_data['Sell_Signal'] = np.nan
+    
+    # Define the condition for buy/sell
+    for i in range(1, len(stock_data)):
+        if stock_data['EMA20'].iloc[i] > stock_data['EMA50'].iloc[i] and stock_data['EMA20'].iloc[i-1] <= stock_data['EMA50'].iloc[i-1]:
+            stock_data['Buy_Signal'].iloc[i] = stock_data['Close'].iloc[i]
+        elif stock_data['EMA20'].iloc[i] < stock_data['EMA50'].iloc[i] and stock_data['EMA20'].iloc[i-1] >= stock_data['EMA50'].iloc[i-1]:
+            stock_data['Sell_Signal'].iloc[i] = stock_data['Close'].iloc[i]
+# Update the apply_indicators function to include 50 EMA for Buy/Sell logic
+def apply_indicators(stock_data, selected_indicators):
+    if 'SMA' in selected_indicators:
+        stock_data['SMA'] = stock_data['Close'].rolling(window=20).mean()
+    if 'EMA' in selected_indicators:
+        stock_data['EMA20'] = stock_data['Close'].ewm(span=20, adjust=False).mean()
+        stock_data['EMA50'] = stock_data['Close'].ewm(span=50, adjust=False).mean()
+        calculate_buy_sell_signals(stock_data)  # Call the buy/sell signal calculation
+    if 'RSI' in selected_indicators:
+        delta = stock_data['Close'].diff(1)
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        stock_data['RSI'] = 100 - (100 / (1 + rs))
+    if 'Bollinger Bands' in selected_indicators:
+        stock_data['SMA20'] = stock_data['Close'].rolling(window=20).mean()
+        stock_data['Upper Band'] = stock_data['SMA20'] + 2 * stock_data['Close'].rolling(window=20).std()
+        stock_data['Lower Band'] = stock_data['SMA20'] - 2 * stock_data['Close'].rolling(window=20).std()
+    if 'MACD' in selected_indicators:
+        short_ema = stock_data['Close'].ewm(span=12, adjust=False).mean()
+        long_ema = stock_data['Close'].ewm(span=26, adjust=False).mean()
+        stock_data['MACD'] = short_ema - long_ema
+        stock_data['Signal Line'] = stock_data['MACD'].ewm(span=9, adjust=False).mean()
+
+def plot_stock_data_with_ladders(stock_data, selected_indicators=[], num_ladders=5):
+    """
+    Function to plot stock data with candlesticks and ladders in each candle.
+    
+    Args:
+    - stock_data (DataFrame): DataFrame containing stock OHLC data.
+    - selected_indicators (list): List of selected indicators to plot.
+    - num_ladders (int): Number of ladders to draw within each candle (default is 5).
+    """
+    # Clear previous plots in the plot frame
+    for widget in plot_frame.winfo_children():
+        widget.destroy()
+
+    # Apply selected indicators to the stock data
+    apply_indicators(stock_data, selected_indicators)
+
+    # Create a dictionary to hold the additional plots for indicators
+    ap_dict = []
+
+    # Add indicators if they are selected
+    if 'RSI' in selected_indicators:
+        ap_rsi = mpf.make_addplot(stock_data['RSI'], panel='lower', ylabel='RSI', color='blue')
+        ap_dict.append(ap_rsi)
+    if 'MACD' in selected_indicators:
+        ap_macd = mpf.make_addplot(stock_data['MACD'], panel='lower', color='green')
+        ap_signal = mpf.make_addplot(stock_data['Signal Line'], panel='lower', color='red')
+        ap_dict.extend([ap_macd, ap_signal])
+    if 'SMA' in selected_indicators:
+        ap_sma = mpf.make_addplot(stock_data['SMA'], color='orange')
+        ap_dict.append(ap_sma)
+    if 'EMA' in selected_indicators:
+        ap_ema20 = mpf.make_addplot(stock_data['EMA20'], color='purple', label='EMA20')
+        ap_ema50 = mpf.make_addplot(stock_data['EMA50'], color='blue', label='EMA50')
+        ap_dict.extend([ap_ema20, ap_ema50])
+        
+        # Buy and Sell signals (scatter plots)
+        ap_buy = mpf.make_addplot(stock_data['Buy_Signal'], type='scatter', markersize=100, marker='^', color='green', label='Buy Signal')
+        ap_sell = mpf.make_addplot(stock_data['Sell_Signal'], type='scatter', markersize=100, marker='v', color='red', label='Sell Signal')
+        ap_dict.extend([ap_buy, ap_sell])
+
+    if 'Bollinger Bands' in selected_indicators:
+        ap_upper = mpf.make_addplot(stock_data['Upper Band'], color='green')
+        ap_lower = mpf.make_addplot(stock_data['Lower Band'], color='red')
+        ap_dict.extend([ap_upper, ap_lower])
+
+    # Create the candlestick chart with indicators
+    fig, axes = mpf.plot(stock_data, type='candle', returnfig=True, style='charles',
+                         title=f"Stock Price with Ladders - {update_selected_ticker}",
+                         ylabel="Price", addplot=ap_dict)
+
+    # Add ladders to each candlestick
+    ax = axes[0]  # Primary axes for the candlestick chart
+    for i, (idx, row) in enumerate(stock_data.iterrows()):
+        high = row['High']
+        low = row['Low']
+        
+        # Create ladder intervals between high and low
+        ladder_steps = np.linspace(low, high, num_ladders + 2)[1:-1]  # Exclude actual high/low
+        for ladder_price in ladder_steps:
+            ax.hlines(ladder_price, xmin=i-0.4, xmax=i+0.4, colors='gray', linewidth=0.5)  # Horizontal line
+
+    # Embed the candlestick chart into the Tkinter window
+    canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # Add toolbar for zooming/panning
+    toolbar = NavigationToolbar2Tk(canvas, plot_frame)
+    toolbar.update()
+    canvas.get_tk_widget().pack()
+
+    # Close the figure to avoid memory issues
+    plt.close(fig)
+# Function to open the indicator selection window
+def open_indicators():
+    indicator_window = tk.Toplevel(window)
+    indicator_window.title("Select Indicators")
+    indicator_window.geometry("400x500")  # Increased height to fit new indicators
+
+    tk.Label(indicator_window, text="Select Indicators:").pack(pady=10)
+
+    # Updated list of indicators
+    indicators = {
+        "SMA": "Simple Moving Average (SMA)",
+        "EMA": "Exponential Moving Average (EMA)",
+        "RSI": "Relative Strength Index (RSI)",
+        "Bollinger Bands": "Volatility with upper and lower bands around a moving average",
+        "MACD": "Moving Average Convergence Divergence (MACD)",
+        "KDJ": "Stochastic Oscillator with Moving Average (KDJ)",
+        "Supertrend": "Trend-following indicator (Supertrend)",
+        "Volume Profile (VP)": "Price distribution over a time period (VP)"
+    }
+
+    indicator_var_dict = {}
+    for indicator, description in indicators.items():
+        var = tk.BooleanVar()
+        cb = tk.Checkbutton(indicator_window, text=indicator, variable=var)
+        cb.pack(anchor=tk.W)
+        tk.Label(indicator_window, text=description, wraplength=300).pack(anchor=tk.W, padx=20, pady=5)
+        indicator_var_dict[indicator] = var
+
+    # Function to apply selected indicators and close the window
+    def apply_and_close():
+        global selected_indicators  # Ensure to use the global variable
+        selected_indicators.clear()
+        for indicator, var in indicator_var_dict.items():
+            if var.get():
+                selected_indicators.append(indicator)
+        update_predictions(ticker_entry.get(), selected_indicators)  # Use ticker_entry.get()
+        indicator_window.destroy()
+
+    tk.Button(indicator_window, text="Apply", command=apply_and_close).pack(pady=20)
+
+def apply_indicators(stock_data, selected_indicators):
+    if 'SMA' in selected_indicators:
+        stock_data['SMA'] = stock_data['Close'].rolling(window=20).mean()
+    if 'EMA' in selected_indicators:
+        stock_data['EMA20'] = stock_data['Close'].ewm(span=20, adjust=False).mean()
+        stock_data['EMA50'] = stock_data['Close'].ewm(span=50, adjust=False).mean()
+        calculate_buy_sell_signals(stock_data)  # Call the buy/sell signal calculation
+    if 'RSI' in selected_indicators:
+        delta = stock_data['Close'].diff(1)
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        stock_data['RSI'] = 100 - (100 / (1 + rs))
+    if 'Bollinger Bands' in selected_indicators:
+        stock_data['SMA20'] = stock_data['Close'].rolling(window=20).mean()
+        stock_data['Upper Band'] = stock_data['SMA20'] + 2 * stock_data['Close'].rolling(window=20).std()
+        stock_data['Lower Band'] = stock_data['SMA20'] - 2 * stock_data['Close'].rolling(window=20).std()
+    if 'MACD' in selected_indicators:
+        short_ema = stock_data['Close'].ewm(span=12, adjust=False).mean()
+        long_ema = stock_data['Close'].ewm(span=26, adjust=False).mean()
+        stock_data['MACD'] = short_ema - long_ema
+        stock_data['Signal Line'] = stock_data['MACD'].ewm(span=9, adjust=False).mean()
+
+def calculate_kdj(stock_data, n=14):
+    """
+    Calculate the KDJ indicator.
+    
+    Args:
+    - stock_data (DataFrame): DataFrame containing stock OHLC data.
+    - n (int): Period for calculation.
+    
+    Returns:
+    - stock_data (DataFrame): Updated DataFrame with KDJ values.
+    """
+    low_min = stock_data['Low'].rolling(window=n).min()
+    high_max = stock_data['High'].rolling(window=n).max()
+    
+    stock_data['K'] = 100 * ((stock_data['Close'] - low_min) / (high_max - low_min)).rolling(window=3).mean()
+    stock_data['D'] = stock_data['K'].rolling(window=3).mean()
+    stock_data['J'] = 3 * stock_data['K'] - 2 * stock_data['D']
+    
+    return stock_data
+# Dynamic column display function
+def open_settings():
+    settings_window = tk.Toplevel(window)
+    settings_window.title("Settings")
+    settings_window.geometry("300x300")
+
+    tk.Label(settings_window, text="Select Columns to Display:").pack(pady=10)
+
+    column_options = ["Ticker", "Open P/L", "Market Value", "Last Price"]
+    for col in column_options:
+        var = tk.BooleanVar(value=col in ticker_treeview["displaycolumns"])
+        cb = tk.Checkbutton(settings_window, text=col, variable=var)
+        cb.column_name = col
+        cb.pack(anchor=tk.W)
+        cb.var = var
+
+    def update_columns():
+        new_columns = [cb.column_name for cb in settings_window.pack_slaves() if isinstance(cb, tk.Checkbutton) and cb.var.get()]
+
+        # Set new columns only if they exist in the original column list
+        valid_columns = ["Ticker", "Open P/L", "Market Value", "Last Price"]
+        new_columns = [col for col in new_columns if col in valid_columns]
+
+        # Update treeview columns and displaycolumns
+        ticker_treeview["displaycolumns"] = new_columns
+        ticker_treeview["columns"] = valid_columns  # Ensure all columns are available
+
+        for col in valid_columns:
+            if col in new_columns:
+                ticker_treeview.heading(col, text=col)  # Set the heading for displayed columns
+            else:
+                ticker_treeview.heading(col, text='')  # Clear heading for hidden columns
+
+        settings_window.destroy()
+
+    apply_button = tk.Button(settings_window, text="Apply", command=update_columns)
+    apply_button.pack(pady=20)
+
+# Initialize the main Tkinter window
+window = tk.Tk()
+window.title("Stock Prediction and Monitoring")
+window.geometry("800x600")
+# Create PanedWindow for layout
+paned_window = PanedWindow(window)
+paned_window.pack(fill=tk.BOTH, expand=True)
+# Create left frame for input and output
+left_frame = tk.Frame(paned_window)
+paned_window.add(left_frame)
+# Ticker entry
+# Frame for Ticker row
+ticker_frame = tk.Frame(left_frame)
+ticker_frame.pack(side=tk.TOP, anchor=tk.W, padx=10)
+# Ticker Symbol - Label and Entry in the same row
+ticker_label = tk.Label(ticker_frame, text="Ticker Symbol:")
+ticker_label.pack(side=tk.LEFT, padx=5,pady=30)
+ticker_entry = tk.Entry(ticker_frame)
+ticker_entry.pack(side=tk.LEFT, padx=10,pady=30)
+# Range Frame for Range row
+range_frame = tk.Frame(left_frame)
+range_frame.pack(side=tk.TOP, anchor=tk.W, padx=10)
+# Range selection
+range_var = tk.StringVar(value='1d')
+range_label = tk.Label(range_frame, text="Range:")
+range_label.pack(side=tk.LEFT, padx=10)
+range_entry = ttk.Combobox(range_frame, textvariable=range_var, values=["1h","4h","8h","1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "ytd", "max"])
+range_entry.pack(side=tk.LEFT, padx=40)
+# Interval Frame for Range row
+interal_frame = tk.Frame(left_frame)
+interal_frame.pack(side=tk.TOP, anchor=tk.W, padx=10)
+# Interval selection
+interval_var = tk.StringVar(value='1m')
+interval_label = tk.Label(interal_frame, text="Interval:")
+interval_label.pack(side=tk.LEFT, padx=10)
+interval_entry = ttk.Combobox(interal_frame, textvariable=interval_var, values=["1m", "2m", "5m", "15m", "30m", "1h", "1d"])
+interval_entry.pack(side=tk.LEFT, padx=35)
+# Hours Frame for Range row
+hours_frame = tk.Frame(left_frame)
+hours_frame.pack(side=tk.TOP, anchor=tk.W, padx=10)
+# Hours ahead
+hours_ahead_var = tk.StringVar(value='24')
+hours_ahead_label = tk.Label(hours_frame, text="Hours Ahead:")
+hours_ahead_label.pack(side=tk.LEFT, padx=10)
+hours_ahead_entry = tk.Entry(hours_frame, textvariable=hours_ahead_var)
+hours_ahead_entry.pack(side=tk.LEFT, padx=5)
+
+# Update button
+update_button = tk.Button(left_frame, text="Update", command=lambda: plot_stock_data_with_ladders(ticker_entry.get()))
+update_button.pack(pady=10)
+# Button for indicator selection
+indicator_button = tk.Button(paned_window, text="Select Indicators", command=open_indicators)
+indicator_button.pack(side=tk.LEFT,anchor=tk.NE,padx=1, pady=1)
+# Settings icon
+settings_icon = ImageTk.PhotoImage(Image.open(r"C:\Users\chant\Downloads\settings.png").resize((20, 20)))
+# Settings button positioned at the top-right corner of the ticker_treeview
+settings_button = tk.Button(paned_window, text="Settings",image=settings_icon, command=open_settings)
+settings_button.pack(side=tk.LEFT, anchor=tk.NE, padx=1, pady=0)  # Top-right corner
+# Result labels
+result_label = tk.Label(left_frame, text="")
+result_label.pack(pady=5)
+high_result_label = tk.Label(left_frame, text="")
+high_result_label.pack(pady=5)
+low_result_label = tk.Label(left_frame, text="")
+low_result_label.pack(pady=5)
+
+# Create frame for plot
+plot_frame = tk.Frame(paned_window)
+paned_window.add(plot_frame)
+
+# Ticker Treeview
+ticker_treeview = ttk.Treeview(left_frame, columns=("Ticker"), show='headings')
+ticker_treeview.heading("Ticker", text="Ticker")
+# Add a scrollbar
+scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=ticker_treeview.yview)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+ticker_treeview.configure(yscroll=scrollbar.set)
+
+
+# Set up treeview to allow selection
+ticker_treeview.pack(fill=tk.BOTH, expand=True)
+ticker_treeview.bind("<<TreeviewSelect>>", load_ticker_to_entry)  # Bind selection event
+
+# Refresh button for the ticker list
+refresh_button = tk.Button(left_frame, text="Refresh Tickers", command=refresh_ticker_list)
+refresh_button.pack(pady=5)
+
+# Load initial ticker list
+create_ticker_list()
+
+# Bind the selection event
+ticker_treeview.bind('<<TreeviewSelect>>', load_ticker_to_entry)
+
+# Bind selection event
+ticker_treeview.bind('<<TreeviewSelect>>', update_selected_ticker)
+ticker_treeview.bind('<ButtonRelease-1>', load_ticker_to_entry)  # Click event to load ticker into entry
+
+# Create initial ticker lists
+create_ticker_list()
+
+# Start the Tkinter main loop
+window.mainloop()
